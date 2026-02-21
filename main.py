@@ -2,6 +2,10 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 import database, models, schemas, crud, security
+try:
+    from typing import Annotated
+except ImportError:
+    from typing_extensions import Annotated
 
 # Създаваме таблиците, ако не съществуват
 models.Base.metadata.create_all(bind=database.engine)
@@ -11,6 +15,19 @@ app = FastAPI(
     description="Backend for the English Learning App",
     version="1.0.0"
 )
+
+async def get_current_user(token: Annotated[str, Depends(security.oauth2_scheme)], db: Session = Depends(database.get_db)):
+    # 1. Опитваме се да разкодираме имейла от токена
+    email = security.decode_access_token(token)
+    if email is None:
+        raise HTTPException(status_code=401, detail="Невалиден пропуск (токен)")
+    
+    # 2. Търсим потребителя в базата данни
+    user = crud.get_user_by_email(db, email=email)
+    if user is None:
+        raise HTTPException(status_code=401, detail="Потребителят не е намерен")
+    
+    return user
 
 @app.get("/")
 def read_root():
@@ -47,3 +64,9 @@ def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(), db:
     
     # Връщаме го на мобилното приложение (или в нашия случай - на браузъра)
     return {"access_token": access_token, "token_type": "bearer"}
+
+@app.get("/users/me", response_model=schemas.UserResponse)
+def read_users_me(current_user: Annotated[models.User, Depends(get_current_user)]):
+    # Тази функция ще се изпълни САМО ако токенът е валиден. 
+    # FastAPI автоматично ще провери токена чрез get_current_user.
+    return current_user

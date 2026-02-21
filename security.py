@@ -1,24 +1,30 @@
 import jwt
 from datetime import datetime, timedelta
+from fastapi.security import OAuth2PasswordBearer # ТОВА ЛИПСВАШЕ
+from jose import JWTError, jwt as jose_jwt # ТОВА Е ЗА РАЗКОДИРАНЕ
 
-# ТАЙНИЯТ КЛЮЧ: С него сървърът "подписва" пропуските, за да не могат хакери да си ги фалшифицират.
-# В реално приложение този ключ се пази в отделен скрит файл, но за сега ще го сложим тук.
+# ТАЙНИЯТ КЛЮЧ
 SECRET_KEY = "super-secret-english-app-key" 
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 # Пропускът ще важи 1 час, след което телефонът ще иска нов
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+# Казваме на FastAPI къде се намира маршрутът за вход
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
 def create_access_token(data: dict):
-    """
-    Тази функция взима данни (напр. имейла на потребителя) 
-    и ги превръща в криптиран JWT пропуск (токен).
-    """
     to_encode = data.copy()
-    
-    # Задаваме кога изтича токенът
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
-    
-    # Генерираме самия токен
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    
+    encoded_jwt = jose_jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
+
+def decode_access_token(token: str):
+    try:
+        # Използваме jose_jwt за разкодиране
+        payload = jose_jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        if email is None:
+            return None
+        return email
+    except Exception:
+        return None
