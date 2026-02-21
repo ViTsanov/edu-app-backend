@@ -1,0 +1,24 @@
+# Виртуална среда
+venv/
+env/
+ENV/
+
+# Кеш файлове на Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Файлове със секретни ключове и пароли (за бъдещето)
+.env
+secrets.json
+
+# База данни (ако ползвахме SQLite, но ние сме с Postgres, все пак е добра практика)
+*.db
+*.sqlite3
+
+# Системни файлове (Windows/Mac)
+.DS_Store
+Thumbs.db
+
+# VS Code настройки
+.vscode/
