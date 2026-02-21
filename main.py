@@ -6,6 +6,7 @@ try:
     from typing import Annotated
 except ImportError:
     from typing_extensions import Annotated
+import ai_service # Не забравяй да го импортнеш най-горе!
 
 # Създаваме таблиците, ако не съществуват
 models.Base.metadata.create_all(bind=database.engine)
@@ -28,6 +29,15 @@ async def get_current_user(token: Annotated[str, Depends(security.oauth2_scheme)
         raise HTTPException(status_code=401, detail="Потребителят не е намерен")
     
     return user
+
+# Функция, която проверява дали потребителят е Експерт
+def check_is_expert(current_user: Annotated[models.User, Depends(get_current_user)]):
+    if current_user.role != models.UserRole.EXPERT:
+        raise HTTPException(
+            status_code=403, 
+            detail="Нямате нужните права. Този ресурс е само за Експерти."
+        )
+    return current_user
 
 @app.get("/")
 def read_root():
@@ -70,3 +80,33 @@ def read_users_me(current_user: Annotated[models.User, Depends(get_current_user)
     # Тази функция ще се изпълни САМО ако токенът е валиден. 
     # FastAPI автоматично ще провери токена чрез get_current_user.
     return current_user
+
+@app.get("/expert/dashboard")
+def get_expert_dashboard(expert: Annotated[models.User, Depends(check_is_expert)]):
+    return {
+        "message": f"Здравейте, Експерт {expert.full_name}!",
+        "pending_tasks": "Тук ще се виждат упражненията за одобрение."
+    }
+
+@app.post("/expert/generate-exercise")
+def trigger_ai_exercise(
+    module: str, 
+    level: str, 
+    expert: Annotated[models.User, Depends(check_is_expert)],
+    db: Session = Depends(database.get_db)
+):
+    # 1. Викаме AI да измисли упражнение
+    raw_ai_data = ai_service.generate_exercise_ai(module, level)
+    
+    # 2. Записваме го в базата като "за одобрение"
+    new_exercise = models.Exercise(
+        title=f"{module} - {level}",
+        content=raw_ai_data,
+        cefr_level=level,
+        is_approved=False # Важно!
+    )
+    db.add(new_exercise)
+    db.commit()
+    db.refresh(new_exercise)
+    
+    return {"message": "Упражнението е генерирано и чака преглед!", "id": new_exercise.id}

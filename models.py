@@ -21,3 +21,13 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     
     # Тук в бъдеще ще добавим полета за XP, ниво (A1-C2) и др.
+
+class Exercise(Base):
+    __tablename__ = "exercises"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String)
+    content = Column(String) # Тук ще е JSON текста на упражнението
+    cefr_level = Column(String) # A1, A2, B1...
+    is_approved = Column(Boolean, default=False) # По подразбиране НЕ Е одобрено
+    created_by_ai = Column(Boolean, default=True)

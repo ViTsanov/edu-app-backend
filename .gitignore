@@ -2,6 +2,7 @@
 venv/
 env/
 ENV/
+.env
 
 # Кеш файлове на Python
 __pycache__/
