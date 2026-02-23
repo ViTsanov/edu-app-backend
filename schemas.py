@@ -18,7 +18,17 @@ class UserResponse(BaseModel):
 
     class Config:
         from_attributes = True
-        
+
 class Token(BaseModel):
     access_token: str
     token_type: str
+
+class ExerciseResponse(BaseModel):
+    id: int
+    title: str
+    content: str
+    cefr_level: str
+    is_approved: bool
+    
+    class Config:
+        from_attributes = True

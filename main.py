@@ -110,3 +110,14 @@ def trigger_ai_exercise(
     db.refresh(new_exercise)
     
     return {"message": "Упражнението е генерирано и чака преглед!", "id": new_exercise.id}
+
+@app.get("/expert/pending", response_model=list[schemas.ExerciseResponse]) # Ще създадем схемата след малко
+def list_pending(expert: Annotated[models.User, Depends(check_is_expert)], db: Session = Depends(database.get_db)):
+    return crud.get_pending_exercises(db)
+
+@app.put("/expert/approve/{exercise_id}")
+def approve(exercise_id: int, expert: Annotated[models.User, Depends(check_is_expert)], db: Session = Depends(database.get_db)):
+    exercise = crud.approve_exercise(db, exercise_id)
+    if not exercise:
+        raise HTTPException(status_code=404, detail="Упражнението не е намерено")
+    return {"status": "success", "message": f"Упражнение №{exercise_id} е одобрено!"}
