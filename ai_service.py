@@ -16,7 +16,7 @@ def generate_exercise_ai(module: str, level: str):
     """
 
     response = client.chat.completions.create(
-        model="gpt-3.5-turbo", # Или gpt-4o ако имаш достъп
+        model="gpt-4o", # Или gpt-4o ако имаш достъп
         messages=[{"role": "system", "content": prompt}],
         response_format={ "type": "json_object" }
     )

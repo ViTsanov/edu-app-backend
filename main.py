@@ -2,6 +2,7 @@ from fastapi import FastAPI, Depends, HTTPException
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 import database, models, schemas, crud, security
+from typing import List
 try:
     from typing import Annotated
 except ImportError:
@@ -111,7 +112,7 @@ def trigger_ai_exercise(
     
     return {"message": "Упражнението е генерирано и чака преглед!", "id": new_exercise.id}
 
-@app.get("/expert/pending", response_model=list[schemas.ExerciseResponse]) # Ще създадем схемата след малко
+@app.get("/expert/pending", response_model=List[schemas.ExerciseResponse]) # Ще създадем схемата след малко
 def list_pending(expert: Annotated[models.User, Depends(check_is_expert)], db: Session = Depends(database.get_db)):
     return crud.get_pending_exercises(db)
 
@@ -121,3 +122,9 @@ def approve(exercise_id: int, expert: Annotated[models.User, Depends(check_is_ex
     if not exercise:
         raise HTTPException(status_code=404, detail="Упражнението не е намерено")
     return {"status": "success", "message": f"Упражнение №{exercise_id} е одобрено!"}
+
+@app.get("/exercises")
+def get_exercises(db: Session = Depends(database.get_db)):
+    # Връщаме всички упражнения от таблицата exercises
+    exercises = db.query(models.Exercise).all()
+    return exercises
