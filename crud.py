@@ -11,17 +11,19 @@ def get_user_by_email(db: Session, email: str):
 
 # Функция за създаване на нов потребител
 def create_user(db: Session, user: schemas.UserCreate):
-    # Криптираме паролата
+    # 1. Криптираме паролата
     hashed_password = pwd_context.hash(user.password)
     
-    # Създаваме записа за базата данни
+    # 2. Създаваме записа за базата данни с новите полета
     db_user = models.User(
+        username=user.username,      # Вече използваме username от схемата
         email=user.email,
         hashed_password=hashed_password,
-        full_name=user.full_name
+        role_id=user.role_id,        # Записваме подаденото ID на ролята
+        total_xp=0                   # Всеки нов започва с 0 точки
     )
     
-    # Добавяме и запазваме
+    # 3. Добавяме и записваме в PostgreSQL
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
