@@ -108,7 +108,7 @@ async def trigger_ai_exercise(
     # Тъй като AI все още иска текст ("A1", "Grammar"), ще ги подаваме ръчно за теста:
     # В реалния случай тук ще ги извличаме от базата спрямо ID-тата
     level_name = db_level.name 
-    module_name = db_level.module
+    module_name = db_module.name
 
     # 1. Викаме AI да измисли упражнение (Чакаме асинхронно с 'await')
     raw_ai_data = await ai_service.generate_exercise_ai(module=module_name, level=level_name)
@@ -196,3 +196,15 @@ async def submit_audio_exercise(
         # 6. ВАЖНО: Изтриваме временния аудио файл от сървъра, за да не пълним харддиска (GDPR best practice)
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
+
+@app.get("/modules")
+def get_all_modules(db: Session = Depends(database.get_db)):
+    # Вземаме всички модули от базата
+    modules = db.query(models.Module).all()
+    return [{"id": m.id, "name": m.name} for m in modules]
+
+@app.get("/levels")
+def get_all_levels(db: Session = Depends(database.get_db)):
+    # Вземаме всички нива от базата
+    levels = db.query(models.Level).all()
+    return [{"id": l.id, "name": l.name} for l in levels]

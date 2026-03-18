@@ -37,13 +37,15 @@ def verify_password(plain_password, hashed_password):
 
 # Вземане на всички неодобрени упражнения
 def get_pending_exercises(db: Session):
-    return db.query(models.Exercise).filter(models.Exercise.is_approved == False).all()
+    # Използваме новия статус PENDING
+    return db.query(models.Exercise).filter(models.Exercise.status == models.ExerciseStatus.PENDING).all()
 
 # Одобряване на конкретно упражнение
 def approve_exercise(db: Session, exercise_id: int):
     db_exercise = db.query(models.Exercise).filter(models.Exercise.id == exercise_id).first()
     if db_exercise:
-        db_exercise.is_approved = True
+        # Сменяме статуса на APPROVED
+        db_exercise.status = models.ExerciseStatus.APPROVED
         db.commit()
         db.refresh(db_exercise)
     return db_exercise
