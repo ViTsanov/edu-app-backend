@@ -10,9 +10,20 @@ except ImportError:
 import ai_service # Не забравяй да го импортнеш най-горе!
 import shutil
 import os
+from pydantic import BaseModel
+from typing import List
+from passlib.context import CryptContext
 
 # Създаваме таблиците, ако не съществуват
 models.Base.metadata.create_all(bind=database.engine)
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+class UserCreateRequest(BaseModel):
+    email: str
+    username: str
+    password: str
+    role_id: int = 1
 
 app = FastAPI(
     title="English Learning API",
@@ -138,10 +149,21 @@ def approve(exercise_id: int, expert: Annotated[models.User, Depends(check_is_ex
         raise HTTPException(status_code=404, detail="Упражнението не е намерено")
     return {"status": "success", "message": f"Упражнение №{exercise_id} е одобрено!"}
 
+class ExerciseUpdateRequest(BaseModel):
+    content_prompt: str
+
+@app.put("/expert/edit/{exercise_id}")
+def edit_exercise(exercise_id: int, request: ExerciseUpdateRequest, expert: Annotated[models.User, Depends(check_is_expert)], db: Session = Depends(database.get_db)):
+    exercise = crud.update_exercise_content(db, exercise_id, request.content_prompt)
+    if not exercise:
+        raise HTTPException(status_code=404, detail="Упражнението не е намерено")
+    return {"status": "success", "message": f"Упражнение №{exercise_id} е обновено!"}
+
 @app.get("/exercises")
 def get_exercises(db: Session = Depends(database.get_db)):
-    # Връщаме всички упражнения от таблицата exercises
-    exercises = db.query(models.Exercise).all()
+    # 🟢 ПРОМЯНА: Връщаме САМО упражненията, които са одобрени!
+    # Използваме models.ExerciseStatus.APPROVED
+    exercises = db.query(models.Exercise).filter(models.Exercise.status == models.ExerciseStatus.APPROVED).all()
     return exercises
 
 @app.post("/exercises/{exercise_id}/submit-audio")
@@ -185,6 +207,7 @@ async def submit_audio_exercise(
             explanation=ai_evaluation["explanation"]
         )
         db.add(new_analysis)
+        current_user.total_xp += new_result.xp_earned
         db.commit()
         
         return {
@@ -208,3 +231,97 @@ def get_all_levels(db: Session = Depends(database.get_db)):
     # Вземаме всички нива от базата
     levels = db.query(models.Level).all()
     return [{"id": l.id, "name": l.name} for l in levels]
+
+@app.delete("/expert/reject/{exercise_id}")
+def reject_exercise(
+    exercise_id: int, 
+    expert: Annotated[models.User, Depends(check_is_expert)], 
+    db: Session = Depends(database.get_db)
+):
+    exercise = db.query(models.Exercise).filter(models.Exercise.id == exercise_id).first()
+    if not exercise:
+        raise HTTPException(status_code=404, detail="Упражнението не е намерено")
+    
+    # Изтриваме го от базата данни
+    db.delete(exercise)
+    db.commit()
+    
+    return {"status": "success", "message": f"Упражнение №{exercise_id} е отхвърлено и изтрито!"}
+
+class TextSubmissionRequest(BaseModel):
+    questions: List[str]
+    expected_answers: List[str]
+    user_answers: List[str]
+
+@app.post("/exercises/{exercise_id}/submit-text")
+async def submit_text_exercise(
+    exercise_id: int,
+    submission: TextSubmissionRequest,
+    current_user: Annotated[models.User, Depends(get_current_user)],
+    db: Session = Depends(database.get_db)
+):
+    # 1. Изпращаме на AI за оценка
+    ai_evaluation = await ai_service.evaluate_text_exercise(
+        submission.questions, submission.expected_answers, submission.user_answers
+    )
+    
+    # 2. Изчисляваме XP точките (напр. 5 базови точки + бонус за висок резултат)
+    xp_earned = 5 + (ai_evaluation["grammar_score"] // 10)
+    
+    # 3. Записваме в базата (Таблица Results)
+    new_result = models.Result(
+        user_id=current_user.id,
+        exercise_id=exercise_id,
+        user_answer=" | ".join(submission.user_answers),
+        xp_earned=xp_earned
+    )
+    db.add(new_result)
+    db.flush()
+    
+    # 4. Записваме анализа (Таблица AI_Analysis)
+    new_analysis = models.AIAnalysis(
+        result_id=new_result.id,
+        grammar_score=ai_evaluation["grammar_score"],
+        fluency_score=0,
+        strengths=ai_evaluation.get("strengths", ""),
+        weaknesses=ai_evaluation.get("weaknesses", ""),
+        explanation=ai_evaluation.get("explanation", "")
+    )
+    db.add(new_analysis)
+    
+    # 5. 🟢 ДОБАВЯМЕ ТОЧКИТЕ В ПРОФИЛА НА УЧЕНИКА
+    current_user.total_xp += xp_earned
+    db.commit()
+    
+    # 6. Връщаме данните на телефона (добавяме и спечелените точки)
+    ai_evaluation["xp_earned"] = xp_earned
+    return {"status": "success", "data": ai_evaluation}
+
+@app.post("/users/")
+def create_user(user: UserCreateRequest, db: Session = Depends(database.get_db)):
+    # 1. Проверяваме дали вече има потребител с такъв имейл или име
+    existing_user = db.query(models.User).filter(
+        (models.User.email == user.email) | (models.User.username == user.username)
+    ).first()
+    
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Този имейл или потребителско име вече е зает!")
+    
+    # 2. Криптираме паролата
+    hashed_pwd = pwd_context.hash(user.password)
+    
+    # 3. Създаваме новия потребител в базата
+    new_user = models.User(
+        email=user.email,
+        username=user.username,
+        hashed_password=hashed_pwd,
+        role_id=user.role_id,
+        total_xp=0  # 🟢 Започва с 0 точки!
+    )
+    
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    
+    # Връщаме данните (FastAPI автоматично ще скрие паролата, ако Pydantic моделът за отговор не я съдържа)
+    return new_user

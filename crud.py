@@ -49,3 +49,12 @@ def approve_exercise(db: Session, exercise_id: int):
         db.commit()
         db.refresh(db_exercise)
     return db_exercise
+
+# Редактиране на съдържанието на упражнение
+def update_exercise_content(db: Session, exercise_id: int, new_content: str):
+    db_exercise = db.query(models.Exercise).filter(models.Exercise.id == exercise_id).first()
+    if db_exercise:
+        db_exercise.content_prompt = new_content
+        db.commit()
+        db.refresh(db_exercise)
+    return db_exercise
