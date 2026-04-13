@@ -90,5 +90,6 @@ class AIAnalysis(Base):
     strengths = Column(Text)
     weaknesses = Column(Text)
     explanation = Column(Text)
+    pronunciation_tips = Column(String, nullable=True)
 
     result = relationship("Result", back_populates="analysis")

@@ -51,12 +51,8 @@ async def generate_exercise_ai(module: str, level: str):
     
     return response.choices[0].message.content
 
-async def evaluate_audio_exercise(audio_file_path: str, expected_topic: str):
-    """
-    1. Превръща аудио файл в текст чрез Whisper.
-    2. Оценява текста чрез GPT-4o.
-    """
-    # Стъпка 1: Превръщане на глас в текст (Speech-to-Text)
+async def evaluate_audio_exercise(audio_file_path: str, instructions: str, content: list, correct_answers: list):
+    # Стъпка 1: Превръщане на глас в текст с Whisper
     with open(audio_file_path, "rb") as audio_file:
         transcript_response = await client.audio.transcriptions.create(
             model="whisper-1",
@@ -64,29 +60,32 @@ async def evaluate_audio_exercise(audio_file_path: str, expected_topic: str):
         )
     transcribed_text = transcript_response.text
 
-    # Стъпка 2: AI Оценка (Prompt Engineering)
+    # Стъпка 2: AI Оценка с ПЪЛЕН КОНТЕКСТ
     prompt = f"""
-    You are an expert English evaluator. The student was asked to speak about "{expected_topic}".
-    Here is what they said (transcribed from audio): "{transcribed_text}"
+    You are an expert English language teacher evaluating a student's spoken audio (transcribed to text).
     
-    Evaluate their response and return STRICTLY a JSON object with the following keys:
-    - 'grammar_score': integer from 1 to 10
-    - 'fluency_score': integer from 1 to 10
-    - 'strengths': string (short positive feedback)
-    - 'weaknesses': string (areas for improvement)
-    - 'explanation': string (detailed explanation in Bulgarian language of the scores)
+    Here is the exact exercise the student is trying to solve:
+    - Instructions given to student: "{instructions}"
+    - Exercise content (sentences/questions): {content}
+    - Expected/Correct answers (if applicable): {correct_answers}
 
-    
+    The speech-to-text system transcribed the student's audio as:
+    "{transcribed_text}"
 
-    You MUST return ONLY a JSON with this exact format:
+    CRITICAL EVALUATION RULES:
+    1. Read the "Instructions" carefully to understand the task.
+       - If it's a READING task, focus strictly on pronunciation accuracy.
+       - If it's a FILL-IN task, check if the word is correct first, THEN evaluate pronunciation.
+    2. Use a scale from 0 to 100 for scores.
+
+    Return STRICTLY a JSON object with this exact format:
     {{
-        "grammar_score": 80,
-        "fluency_score": 70,
-        "strengths": "...",
-        "weaknesses": "...",
-        "explanation": "...",
-        "transcribed_text": "...",
-        "pronunciation_tips": "Тук напиши кои думи са сбъркани и как трябва да се произнесат (напр. word -> /wɜːrd/)" <-- НОВОТО ПОЛЕ
+        "grammar_score": integer (0 to 100, based on accuracy of the task),
+        "fluency_score": integer (0 to 100, based on smooth flow),
+        "strengths": "Кратка похвала на български",
+        "weaknesses": "Кратка зона за подобрение на български",
+        "explanation": "Подробно обяснение на български защо оценката е такава",
+        "pronunciation_tips": "Кои думи са сбъркани и как трябва да се произнесат (напр. word -> /wɜːrd/)"
     }}
     """
 
@@ -96,12 +95,10 @@ async def evaluate_audio_exercise(audio_file_path: str, expected_topic: str):
         response_format={ "type": "json_object" }
     )
     
-    # Разопаковаме JSON отговора и добавяме транскрибирания текст, за да го върнем на телефона
     result_data = json.loads(evaluation_response.choices[0].message.content)
     result_data["transcribed_text"] = transcribed_text 
     
     return result_data
-
 async def evaluate_text_exercise(questions: list, expected: list, user_answers: list):
     prompt = f"""
     You are an expert English teacher evaluating a student's text exercise.

@@ -13,6 +13,7 @@ import os
 from pydantic import BaseModel
 from typing import List
 from passlib.context import CryptContext
+import json
 
 # Създаваме таблиците, ако не съществуват
 models.Base.metadata.create_all(bind=database.engine)
@@ -170,7 +171,7 @@ def get_exercises(db: Session = Depends(database.get_db)):
 async def submit_audio_exercise(
     exercise_id: int,
     current_user: Annotated[models.User, Depends(get_current_user)],
-    file: UploadFile = File(...), # Това казва на FastAPI да очаква multipart/form-data файл
+    file: UploadFile = File(...), 
     db: Session = Depends(database.get_db)
 ):
     # 1. Проверяваме дали упражнението съществува
@@ -178,37 +179,63 @@ async def submit_audio_exercise(
     if not exercise:
         raise HTTPException(status_code=404, detail="Упражнението не е намерено")
 
-    # 2. Запазваме файла временно на сървъра, за да го пратим на Whisper
+    # 2. ИЗВЛИЧАМЕ ПЪЛНИЯ КОНТЕКСТ ОТ JSON-А
+    instructions = "Read the text aloud or answer the prompt."
+    content = []
+    correct_answers = []
+    try:
+        ex_data = json.loads(exercise.content_prompt)
+        instructions = ex_data.get("instructions", instructions)
+        content = ex_data.get("content", [])
+        correct_answers = ex_data.get("correct_answers", [])
+    except Exception as e:
+        print(f"Грешка при четене на JSON: {e}")
+
+    # 3. Запазваме файла временно
     temp_file_path = f"temp_{current_user.id}_{file.filename}"
     with open(temp_file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
         
     try:
-        # 3. Викаме нашия AI Service да оцени аудиото
-        ai_evaluation = await ai_service.evaluate_audio_exercise(temp_file_path, exercise.title)
+        # 4. Викаме нашия обновен AI Service с ВСИЧКИ данни
+        ai_evaluation = await ai_service.evaluate_audio_exercise(
+            audio_file_path=temp_file_path,
+            instructions=instructions,
+            content=content,
+            correct_answers=correct_answers
+        )
         
-        # 4. Записваме в базата (Таблица Results)
+        # Динамично изчисление на XP (базови 5 + бонус)
+        xp_earned = 5 + (ai_evaluation.get("grammar_score", 0) // 10)
+        
+        # 5. Записваме в базата (Таблица Results)
         new_result = models.Result(
             user_id=current_user.id,
             exercise_id=exercise_id,
             user_answer=ai_evaluation["transcribed_text"],
-            xp_earned=10 + ai_evaluation["grammar_score"] # Примерна логика за точки
+            xp_earned=xp_earned
         )
         db.add(new_result)
-        db.flush() # Използваме flush, за да вземем ID-то на резултата веднага
+        db.flush() 
         
-        # 5. Записваме в базата (Таблица AI_Analysis - 1:1 връзка!)
+        # 6. Записваме в базата (Таблица AI_Analysis)
         new_analysis = models.AIAnalysis(
             result_id=new_result.id,
-            grammar_score=ai_evaluation["grammar_score"],
-            fluency_score=ai_evaluation["fluency_score"],
-            strengths=ai_evaluation["strengths"],
-            weaknesses=ai_evaluation["weaknesses"],
-            explanation=ai_evaluation["explanation"]
+            grammar_score=ai_evaluation.get("grammar_score", 0),
+            fluency_score=ai_evaluation.get("fluency_score", 0),
+            strengths=ai_evaluation.get("strengths", ""),
+            weaknesses=ai_evaluation.get("weaknesses", ""),
+            explanation=ai_evaluation.get("explanation", ""),
+            # 🟢 ВАЖНО: Запазваме и съветите за произношение!
+            pronunciation_tips=ai_evaluation.get("pronunciation_tips", "") 
         )
         db.add(new_analysis)
-        current_user.total_xp += new_result.xp_earned
+        
+        current_user.total_xp += xp_earned
         db.commit()
+        
+        # Добавяме точките в отговора, за да ги види Android приложението
+        ai_evaluation["xp_earned"] = xp_earned
         
         return {
             "status": "success", 
@@ -216,7 +243,7 @@ async def submit_audio_exercise(
             "data": ai_evaluation
         }
     finally:
-        # 6. ВАЖНО: Изтриваме временния аудио файл от сървъра, за да не пълним харддиска (GDPR best practice)
+        # Изтриваме временния аудио файл
         if os.path.exists(temp_file_path):
             os.remove(temp_file_path)
 
