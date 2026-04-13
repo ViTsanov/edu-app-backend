@@ -32,6 +32,9 @@ class User(Base):
     classrooms_created = relationship("Classroom", back_populates="teacher")
     # Връзка към резултатите от упражнения
     results = relationship("Result", back_populates="user")
+    english_level = Column(String, default="A1")
+    profile_picture = Column(String, nullable=True)
+    teacher_verification_status = Column(String, default="none")
 
 class Level(Base):
     __tablename__ = "levels"

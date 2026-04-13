@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from typing import List
 from passlib.context import CryptContext
 import json
+from typing import List, Optional
 
 # Създаваме таблиците, ако не съществуват
 models.Base.metadata.create_all(bind=database.engine)
@@ -31,6 +32,20 @@ app = FastAPI(
     description="Backend for the English Learning App",
     version="1.0.0"
 )
+
+# main.py
+class UserProfile(BaseModel):
+    id: int
+    username: str
+    email: str
+    role_id: int
+    total_xp: int
+    english_level: str
+    profile_picture: Optional[str] = None
+    teacher_verification_status: str
+
+    class Config:
+        from_attributes = True
 
 async def get_current_user(token: Annotated[str, Depends(security.oauth2_scheme)], db: Session = Depends(database.get_db)):
     # 1. Опитваме се да разкодираме имейла от токена
@@ -352,3 +367,57 @@ def create_user(user: UserCreateRequest, db: Session = Depends(database.get_db))
     
     # Връщаме данните (FastAPI автоматично ще скрие паролата, ако Pydantic моделът за отговор не я съдържа)
     return new_user
+
+@app.get("/exercises/my-path")
+def get_student_path(
+    current_user: Annotated[models.User, Depends(get_current_user)],
+    db: Session = Depends(database.get_db)
+):
+    # 1. Взимаме всички ОДОБРЕНИ упражнения от базата
+    approved_exercises = db.query(models.Exercise).join(
+        models.Level, models.Exercise.level_id == models.Level.id
+    ).filter(
+        models.Exercise.status == "APPROVED", # или models.ExerciseStatus.APPROVED
+        models.Level.name == current_user.english_level # Сравнява 'A1' от User с 'A1' от Level
+    ).all()
+    
+    # 2. Взимаме всички резултати на този конкретен ученик
+    user_results = db.query(models.Result).filter(models.Result.user_id == current_user.id).all()
+
+    # Създаваме речник за бърза проверка: exercise_id -> най-висок grammar_score
+    exercise_scores = {}
+    for res in user_results:
+        analysis = db.query(models.AIAnalysis).filter(models.AIAnalysis.result_id == res.id).first()
+        score = analysis.grammar_score if analysis else 0
+        
+        if res.exercise_id in exercise_scores:
+            exercise_scores[res.exercise_id] = max(exercise_scores[res.exercise_id], score)
+        else:
+            exercise_scores[res.exercise_id] = score
+
+    # Праг за успешно минаване (например 70 точки)
+    PASSING_SCORE = 70
+
+    # 3. Сглобяваме пътя на ученика
+    path_response = []
+    for ex in approved_exercises:
+        status = "AVAILABLE" # По подразбиране е свободно за решаване
+        best_score = None
+        
+        if ex.id in exercise_scores:
+            best_score = exercise_scores[ex.id]
+            if best_score >= PASSING_SCORE:
+                status = "COMPLETED" # Минато успешно!
+            else:
+                status = "RETRY" # Сгрешено (Даваме право на нов опит)
+                
+        path_response.append({
+            "id": ex.id,
+            "title": ex.title,
+            "content_prompt": ex.content_prompt, # Трябва ни за екрана за решаване
+            "status": status,
+            "best_score": best_score
+        })
+
+    return path_response
+
