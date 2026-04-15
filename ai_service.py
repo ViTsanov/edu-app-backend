@@ -125,3 +125,78 @@ async def evaluate_text_exercise(questions: list, expected: list, user_answers: 
     )
     
     return json.loads(response.choices[0].message.content)
+
+# ============================================================
+# ADD THIS FUNCTION TO YOUR EXISTING ai_service.py
+# ============================================================
+
+async def analyze_test_results(evaluations: list, avg_score: int) -> str:
+    """
+    Takes a list of per-exercise evaluations from a full test and
+    returns a comprehensive improvement analysis in Bulgarian.
+    Called after a student submits a timed test.
+    """
+    summary_text = "\n".join([
+        f"Упражнение {i+1}: Граматика={e.get('grammar_score', 0)}/100. "
+        f"Обяснение: {e.get('explanation', 'Няма')}"
+        for i, e in enumerate(evaluations)
+    ])
+
+    prompt = f"""
+You are an expert English teacher analysing a Bulgarian student's full test results.
+
+The student scored an average of {avg_score}/100 across {len(evaluations)} exercises.
+
+Per-exercise breakdown:
+{summary_text}
+
+Your task is to write a personalised improvement analysis ENTIRELY IN BULGARIAN.
+The analysis must:
+1. Start with a brief overall assessment (1-2 sentences)
+2. Identify the TOP 2-3 specific weak areas (e.g. verb tenses, articles, pronunciation)
+3. Give 2-3 CONCRETE, actionable tips to improve each weak area
+4. End with a motivating sentence
+
+Keep the total response under 300 words. Write in a friendly, encouraging teacher tone.
+Do NOT use JSON — just plain Bulgarian text.
+"""
+
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "system", "content": prompt}],
+        max_tokens=600
+    )
+    return response.choices[0].message.content
+
+
+async def generate_exercise_improvement(
+    questions: list,
+    expected: list,
+    user_answers: list,
+    grammar_score: int
+) -> str:
+    """
+    Called after each regular exercise submission.
+    Returns a short, personalised improvement tip in Bulgarian.
+    """
+    prompt = f"""
+You are a friendly English teacher. A Bulgarian student just completed an exercise.
+
+Score: {grammar_score}/100
+Questions: {questions}
+Expected answers: {expected}
+Student's answers: {user_answers}
+
+Write a SHORT improvement tip (max 80 words) IN BULGARIAN that:
+1. Names the specific grammar/vocabulary mistake (if any)
+2. Gives one concrete rule or trick to remember
+3. Encourages the student
+
+Plain text only, no JSON, no markdown.
+"""
+    response = await client.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "system", "content": prompt}],
+        max_tokens=200
+    )
+    return response.choices[0].message.content

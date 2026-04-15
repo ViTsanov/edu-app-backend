@@ -3,6 +3,7 @@ from sqlalchemy.orm import relationship
 from database import Base
 import enum
 import datetime
+from sqlalchemy.orm import relationship
 
 # Enum за статуса на упражненията 
 class ExerciseStatus(str, enum.Enum):
@@ -96,3 +97,129 @@ class AIAnalysis(Base):
     pronunciation_tips = Column(String, nullable=True)
 
     result = relationship("Result", back_populates="analysis")
+
+class TeacherExercise(Base):
+    """Exercises created and owned by a teacher — saved to their personal library."""
+    __tablename__ = "teacher_exercises"
+
+    id = Column(Integer, primary_key=True, index=True)
+    teacher_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    title = Column(String, index=True)
+    content_prompt = Column(Text)          # same JSON format as Exercise
+    module_id = Column(Integer, ForeignKey("modules.id"), nullable=True)
+    level_id = Column(Integer, ForeignKey("levels.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    teacher = relationship("User")
+    module = relationship("Module")
+    level = relationship("Level")
+
+
+class Test(Base):
+    """A timed test created by a teacher, assigned to one classroom."""
+    __tablename__ = "tests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String, index=True)
+    description = Column(Text, nullable=True)
+    teacher_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    classroom_id = Column(Integer, ForeignKey("classrooms.id"), nullable=False)
+    time_limit_minutes = Column(Integer, default=0)   # 0 = no limit
+    is_active = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+
+    teacher = relationship("User", foreign_keys=[teacher_id])
+    classroom = relationship("Classroom")
+    exercises = relationship("TestExercise", back_populates="test", cascade="all, delete-orphan")
+    attempts = relationship("TestAttempt", back_populates="test", cascade="all, delete-orphan")
+
+
+class TestExercise(Base):
+    """
+    Many-to-many join between Test and an exercise.
+    Supports both approved exercises (exercise_id) and
+    teacher's own exercises (teacher_exercise_id).
+    Exactly one of the two FK fields must be set.
+    """
+    __tablename__ = "test_exercises"
+
+    id = Column(Integer, primary_key=True, index=True)
+    test_id = Column(Integer, ForeignKey("tests.id"), nullable=False)
+    exercise_id = Column(Integer, ForeignKey("exercises.id"), nullable=True)
+    teacher_exercise_id = Column(Integer, ForeignKey("teacher_exercises.id"), nullable=True)
+    order_index = Column(Integer, default=0)
+
+    test = relationship("Test", back_populates="exercises")
+    exercise = relationship("Exercise")
+    teacher_exercise = relationship("TeacherExercise")
+
+
+class TestAttempt(Base):
+    """Records one student's attempt at a specific test."""
+    __tablename__ = "test_attempts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    test_id = Column(Integer, ForeignKey("tests.id"), nullable=False)
+    student_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    started_at = Column(DateTime, default=datetime.datetime.utcnow)
+    finished_at = Column(DateTime, nullable=True)
+    total_score = Column(Integer, nullable=True)        # 0-100 average
+    xp_earned = Column(Integer, default=0)
+    ai_feedback = Column(Text, nullable=True)           # AI analysis of whole test
+    is_completed = Column(Boolean, default=False)
+
+    test = relationship("Test", back_populates="attempts")
+    student = relationship("User", foreign_keys=[student_id])
+    answers = relationship("TestAnswer", back_populates="attempt", cascade="all, delete-orphan")
+
+
+class TestAnswer(Base):
+    """Individual answer within a TestAttempt (one row per exercise in the test)."""
+    __tablename__ = "test_answers"
+
+    id = Column(Integer, primary_key=True, index=True)
+    attempt_id = Column(Integer, ForeignKey("test_attempts.id"), nullable=False)
+    test_exercise_id = Column(Integer, ForeignKey("test_exercises.id"), nullable=False)
+    user_answer = Column(Text)
+    grammar_score = Column(Integer, nullable=True)
+    fluency_score = Column(Integer, nullable=True)
+    ai_explanation = Column(Text, nullable=True)
+
+    attempt = relationship("TestAttempt", back_populates="answers")
+    test_exercise = relationship("TestExercise")
+
+
+class StudentSession(Base):
+    """
+    Tracks how long a student spends in the app.
+    POST /sessions/start  →  creates a row (returns session_id)
+    PUT  /sessions/{id}/end  →  sets ended_at and duration
+    """
+    __tablename__ = "student_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    started_at = Column(DateTime, default=datetime.datetime.utcnow)
+    ended_at = Column(DateTime, nullable=True)
+    duration_seconds = Column(Integer, nullable=True)
+
+    user = relationship("User")
+
+
+class ImprovementSuggestion(Base):
+    """
+    Stores AI-generated improvement tips for a student,
+    generated after each exercise result or after a full test.
+    """
+    __tablename__ = "improvement_suggestions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    source_type = Column(String)          # "exercise" | "test"
+    source_id = Column(Integer)           # result_id or attempt_id
+    suggestion_text = Column(Text)        # Bulgarian text from AI
+    focus_areas = Column(Text)            # JSON array e.g. ["grammar", "pronunciation"]
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+    is_read = Column(Boolean, default=False)
+
+    user = relationship("User")

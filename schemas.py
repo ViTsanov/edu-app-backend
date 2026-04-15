@@ -25,6 +25,9 @@ class UserCreate(UserBase):
 class UserResponse(UserBase):
     id: int
     total_xp: int
+    english_level: str = "A1"
+    profile_picture: Optional[str] = None
+    teacher_verification_status: str = "none"
     
     class Config:
         from_attributes = True # Позволява на Pydantic да чете данни директно от SQLAlchemy моделите
