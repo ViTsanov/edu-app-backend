@@ -3,11 +3,18 @@ venv/
 env/
 ENV/
 .env
+.env.local
+.env.
+.venv/
 
 # Кеш файлове на Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyc
+*.pyo
+*.pyd
+.Python
 
 # Файлове със секретни ключове и пароли (за бъдещето)
 .env
@@ -22,4 +29,8 @@ secrets.json
 Thumbs.db
 
 # VS Code настройки
+.idea/
 .vscode/
+*.iml
+
+*.log

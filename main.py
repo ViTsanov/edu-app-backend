@@ -17,7 +17,13 @@ import json
 from typing import List, Optional
 from pydantic import BaseModel
 from typing import List, Optional
-import random, string, json, datetime
+import random, string, json
+from models import (
+    TeacherExercise, Test, TestExercise,
+    TestAttempt, TestAnswer, StudentSession,
+    ImprovementSuggestion, Homework          # ← add Homework here
+)
+from datetime import datetime as dt
 
 # Създаваме таблиците, ако не съществуват
 models.Base.metadata.create_all(bind=database.engine)
@@ -1126,4 +1132,417 @@ def mark_suggestion_read(
         s.is_read = True
         db.commit()
     return {"status": "success"}
+
+@app.get("/student/my-classrooms")
+def get_student_classrooms(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Returns all classrooms the student has joined with teacher info."""
+    rows = db.query(models.ClassStudent).filter(
+        models.ClassStudent.user_id == current_user.id
+    ).all()
+ 
+    result = []
+    for row in rows:
+        classroom = db.query(models.Classroom).filter(
+            models.Classroom.id == row.classroom_id
+        ).first()
+        if not classroom:
+            continue
+ 
+        teacher = db.query(models.User).filter(
+            models.User.id == classroom.teacher_id
+        ).first()
+        level = db.query(models.Level).filter(
+            models.Level.id == classroom.level_id
+        ).first()
+ 
+        # Count classmates
+        classmate_count = db.query(models.ClassStudent).filter(
+            models.ClassStudent.classroom_id == classroom.id
+        ).count()
+ 
+        # Count pending homework
+        pending_hw = db.query(models.Homework).filter(
+            models.Homework.classroom_id == classroom.id
+        ).count()
+ 
+        result.append({
+            "id": classroom.id,
+            "name": classroom.name,
+            "access_code": classroom.access_code,
+            "teacher_name": teacher.username if teacher else "Unknown",
+            "level": level.name if level else "A1",
+            "classmate_count": classmate_count,
+            "homework_count": pending_hw,
+            "joined_at": row.joined_at.isoformat() if row.joined_at else None
+        })
+    return result
+ 
+ 
+# ════════════════════════════════════════════════════
+# STUDENT — VIEW COMPLETED EXERCISE RESULT
+# ════════════════════════════════════════════════════
+ 
+@app.get("/exercises/{exercise_id}/my-result")
+def get_my_exercise_result(
+    exercise_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """
+    Returns the student's best result for a specific exercise,
+    including their original answers and the AI analysis.
+    """
+    # Get all results for this user + exercise, take the best score
+    results = db.query(models.Result).filter(
+        models.Result.user_id == current_user.id,
+        models.Result.exercise_id == exercise_id
+    ).all()
+ 
+    if not results:
+        raise HTTPException(404, "Нямате резултат за това упражнение.")
+ 
+    # Find the one with the best AI analysis score
+    best_result = None
+    best_score = -1
+    best_analysis = None
+ 
+    for r in results:
+        analysis = db.query(models.AIAnalysis).filter(
+            models.AIAnalysis.result_id == r.id
+        ).first()
+        score = analysis.grammar_score if analysis else 0
+        if score > best_score:
+            best_score = score
+            best_result = r
+            best_analysis = analysis
+ 
+    if not best_result:
+        raise HTTPException(404, "Резултатът не е намерен.")
+ 
+    # Parse user answers back into a list
+    user_answers = best_result.user_answer.split(" | ") \
+        if best_result.user_answer else []
+ 
+    # Get the exercise content for question text
+    exercise = db.query(models.Exercise).filter(
+        models.Exercise.id == exercise_id
+    ).first()
+ 
+    return {
+        "exercise_id": exercise_id,
+        "exercise_title": exercise.title if exercise else "",
+        "exercise_content": exercise.content_prompt if exercise else "",
+        "user_answers": user_answers,
+        "xp_earned": best_result.xp_earned,
+        "completed_at": best_result.created_at.isoformat()
+            if best_result.created_at else None,
+        "grammar_score": best_analysis.grammar_score if best_analysis else 0,
+        "fluency_score": best_analysis.fluency_score if best_analysis else 0,
+        "strengths": best_analysis.strengths if best_analysis else "",
+        "weaknesses": best_analysis.weaknesses if best_analysis else "",
+        "explanation": best_analysis.explanation if best_analysis else "",
+        "pronunciation_tips": best_analysis.pronunciation_tips
+            if best_analysis else None
+    }
+ 
+ 
+# ════════════════════════════════════════════════════
+# HOMEWORK — TEACHER CREATES
+# ════════════════════════════════════════════════════
+ 
+class HomeworkCreate(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    classroom_id: int
+    exercise_id: Optional[int] = None
+    teacher_exercise_id: Optional[int] = None
+    due_date: Optional[str] = None   # ISO string "2024-06-15T23:59:00"
+ 
+ 
+@app.post("/teacher/homework")
+def create_homework(
+    body: HomeworkCreate,
+    teacher: models.User = Depends(check_is_teacher),
+    db: Session = Depends(database.get_db)
+):
+    """Teacher assigns a single exercise as homework to a classroom."""
+    if not body.exercise_id and not body.teacher_exercise_id:
+        raise HTTPException(400, "Трябва exercise_id или teacher_exercise_id.")
+ 
+    classroom = db.query(models.Classroom).filter(
+        models.Classroom.id == body.classroom_id,
+        models.Classroom.teacher_id == teacher.id
+    ).first()
+    if not classroom:
+        raise HTTPException(404, "Класът не е намерен.")
+ 
+    due = None
+    if body.due_date:
+        try:
+            due = dt.fromisoformat(body.due_date)
+        except ValueError:
+            pass
+ 
+    hw = models.Homework(
+        teacher_id=teacher.id,
+        classroom_id=body.classroom_id,
+        title=body.title,
+        description=body.description,
+        exercise_id=body.exercise_id,
+        teacher_exercise_id=body.teacher_exercise_id,
+        due_date=due
+    )
+    db.add(hw)
+    db.commit()
+    db.refresh(hw)
+    return {"id": hw.id, "message": "Домашното е зададено успешно!"}
+ 
+ 
+@app.get("/teacher/homework")
+def get_teacher_homework(
+    teacher: models.User = Depends(check_is_teacher),
+    db: Session = Depends(database.get_db)
+):
+    """Lists all homework assigned by this teacher."""
+    rows = db.query(models.Homework).filter(
+        models.Homework.teacher_id == teacher.id
+    ).order_by(models.Homework.created_at.desc()).all()
+ 
+    result = []
+    for hw in rows:
+        classroom = db.query(models.Classroom).filter(
+            models.Classroom.id == hw.classroom_id
+        ).first()
+        # Count how many students have completed it
+        student_ids = [
+            row.user_id for row in db.query(models.ClassStudent).filter(
+                models.ClassStudent.classroom_id == hw.classroom_id
+            ).all()
+        ]
+        exercise_id = hw.exercise_id
+        completed = 0
+        if exercise_id:
+            completed = db.query(models.Result).filter(
+                models.Result.exercise_id == exercise_id,
+                models.Result.user_id.in_(student_ids)
+            ).count()
+ 
+        result.append({
+            "id": hw.id,
+            "title": hw.title,
+            "description": hw.description,
+            "classroom_name": classroom.name if classroom else "",
+            "classroom_id": hw.classroom_id,
+            "exercise_id": hw.exercise_id,
+            "teacher_exercise_id": hw.teacher_exercise_id,
+            "due_date": hw.due_date.isoformat() if hw.due_date else None,
+            "created_at": hw.created_at.isoformat(),
+            "student_count": len(student_ids),
+            "completed_count": completed
+        })
+    return result
+ 
+ 
+@app.delete("/teacher/homework/{homework_id}")
+def delete_homework(
+    homework_id: int,
+    teacher: models.User = Depends(check_is_teacher),
+    db: Session = Depends(database.get_db)
+):
+    hw = db.query(models.Homework).filter(
+        models.Homework.id == homework_id,
+        models.Homework.teacher_id == teacher.id
+    ).first()
+    if not hw:
+        raise HTTPException(404, "Домашното не е намерено.")
+    db.delete(hw)
+    db.commit()
+    return {"status": "success"}
+ 
+ 
+# ════════════════════════════════════════════════════
+# HOMEWORK — STUDENT SEES
+# ════════════════════════════════════════════════════
+ 
+@app.get("/student/homework")
+def get_student_homework(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Returns all homework assigned to classrooms the student belongs to."""
+    enrollments = db.query(models.ClassStudent).filter(
+        models.ClassStudent.user_id == current_user.id
+    ).all()
+    classroom_ids = [e.classroom_id for e in enrollments]
+ 
+    homework_list = db.query(models.Homework).filter(
+        models.Homework.classroom_id.in_(classroom_ids)
+    ).order_by(models.Homework.due_date.asc()).all()
+ 
+    now = dt.utcnow()
+    result = []
+    for hw in homework_list:
+        # Check if student already submitted this exercise
+        completed = False
+        exercise_id = hw.exercise_id
+        if exercise_id:
+            res = db.query(models.Result).filter(
+                models.Result.user_id == current_user.id,
+                models.Result.exercise_id == exercise_id
+            ).first()
+            completed = res is not None
+ 
+        # Get exercise content
+        content_prompt = None
+        title = hw.title
+        if hw.exercise_id:
+            ex = db.query(models.Exercise).filter(
+                models.Exercise.id == hw.exercise_id
+            ).first()
+            if ex:
+                content_prompt = ex.content_prompt
+        elif hw.teacher_exercise_id:
+            ex = db.query(models.TeacherExercise).filter(
+                models.TeacherExercise.id == hw.teacher_exercise_id
+            ).first()
+            if ex:
+                content_prompt = ex.content_prompt
+ 
+        # Overdue?
+        overdue = hw.due_date is not None and hw.due_date < now
+ 
+        classroom = db.query(models.Classroom).filter(
+            models.Classroom.id == hw.classroom_id
+        ).first()
+ 
+        result.append({
+            "id": hw.id,
+            "title": title,
+            "description": hw.description,
+            "classroom_name": classroom.name if classroom else "",
+            "exercise_id": hw.exercise_id,
+            "teacher_exercise_id": hw.teacher_exercise_id,
+            "content_prompt": content_prompt,
+            "due_date": hw.due_date.isoformat() if hw.due_date else None,
+            "completed": completed,
+            "overdue": overdue and not completed
+        })
+    return result
+ 
+ 
+# ════════════════════════════════════════════════════
+# TEST — UPDATE: activate with opening datetime
+# ════════════════════════════════════════════════════
+ 
+class TestActivateRequest(BaseModel):
+    opens_at: Optional[str] = None  # ISO string, null = open immediately
+ 
+ 
+@app.put("/teacher/tests/{test_id}/activate")
+def activate_test(
+    test_id: int,
+    body: TestActivateRequest = TestActivateRequest(),
+    teacher: models.User = Depends(check_is_teacher),
+    db: Session = Depends(database.get_db)
+):
+    """
+    Activates a test.
+    If opens_at is provided, the test becomes visible to students
+    only after that exact datetime.
+    If opens_at is null/omitted, the test is immediately available.
+    """
+    test = db.query(models.Test).filter(
+        models.Test.id == test_id,
+        models.Test.teacher_id == teacher.id
+    ).first()
+    if not test:
+        raise HTTPException(404, "Тестът не е намерен.")
+ 
+    test.is_active = True
+    if body.opens_at:
+        try:
+            test.opens_at = dt.fromisoformat(body.opens_at)
+        except ValueError:
+            raise HTTPException(400, "Невалиден формат за дата.")
+    else:
+        test.opens_at = None  # available immediately
+ 
+    db.commit()
+ 
+    opens_msg = f"отваря се на {test.opens_at.strftime('%d.%m.%Y %H:%M')}" \
+        if test.opens_at else "достъпен веднага"
+    return {
+        "status": "success",
+        "is_active": True,
+        "opens_at": test.opens_at.isoformat() if test.opens_at else None,
+        "message": f"Тестът е активиран — {opens_msg}."
+    }
+ 
+ 
+@app.put("/teacher/tests/{test_id}/deactivate")
+def deactivate_test(
+    test_id: int,
+    teacher: models.User = Depends(check_is_teacher),
+    db: Session = Depends(database.get_db)
+):
+    test = db.query(models.Test).filter(
+        models.Test.id == test_id,
+        models.Test.teacher_id == teacher.id
+    ).first()
+    if not test:
+        raise HTTPException(404, "Тестът не е намерен.")
+    test.is_active = False
+    db.commit()
+    return {"status": "success", "is_active": False,
+            "message": "Тестът е деактивиран."}
+ 
+ 
+# ════════════════════════════════════════════════════
+# UPDATE: student active tests — respect opens_at
+# ════════════════════════════════════════════════════
+# Replace the existing get_active_tests_for_student endpoint with this:
+ 
+@app.get("/student/active-tests")
+def get_active_tests_for_student(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Returns active tests the student can currently see."""
+    enrollments = db.query(models.ClassStudent).filter(
+        models.ClassStudent.user_id == current_user.id
+    ).all()
+    classroom_ids = [e.classroom_id for e in enrollments]
+ 
+    now = dt.utcnow()
+    tests = db.query(models.Test).filter(
+        models.Test.classroom_id.in_(classroom_ids),
+        models.Test.is_active == True
+    ).all()
+ 
+    result = []
+    for t in tests:
+        # Respect opens_at — hide if not yet open
+        is_open = t.opens_at is None or t.opens_at <= now
+ 
+        attempt = db.query(models.TestAttempt).filter(
+            models.TestAttempt.test_id == t.id,
+            models.TestAttempt.student_id == current_user.id,
+            models.TestAttempt.is_completed == True
+        ).first()
+ 
+        result.append({
+            "id": t.id,
+            "title": t.title,
+            "description": t.description,
+            "time_limit_minutes": t.time_limit_minutes,
+            "exercise_count": len(t.exercises),
+            "is_open": is_open,
+            "opens_at": t.opens_at.isoformat() if t.opens_at else None,
+            "is_completed": attempt is not None,
+            "my_score": attempt.total_score if attempt else None
+        })
+    return result
 

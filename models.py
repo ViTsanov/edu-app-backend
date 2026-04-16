@@ -126,6 +126,7 @@ class Test(Base):
     classroom_id = Column(Integer, ForeignKey("classrooms.id"), nullable=False)
     time_limit_minutes = Column(Integer, default=0)   # 0 = no limit
     is_active = Column(Boolean, default=False)
+    opens_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
 
     teacher = relationship("User", foreign_keys=[teacher_id])
@@ -223,3 +224,23 @@ class ImprovementSuggestion(Base):
     is_read = Column(Boolean, default=False)
 
     user = relationship("User")
+
+class Homework(Base):
+    """A homework assignment created by a teacher for a classroom."""
+    __tablename__ = "homework"
+ 
+    id = Column(Integer, primary_key=True, index=True)
+    teacher_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    classroom_id = Column(Integer, ForeignKey("classrooms.id"), nullable=False)
+    title = Column(String, index=True)
+    description = Column(Text, nullable=True)
+    # Exactly one of these two must be set (approved or teacher's own)
+    exercise_id = Column(Integer, ForeignKey("exercises.id"), nullable=True)
+    teacher_exercise_id = Column(Integer, ForeignKey("teacher_exercises.id"), nullable=True)
+    due_date = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.datetime.utcnow)
+ 
+    teacher = relationship("User", foreign_keys=[teacher_id])
+    classroom = relationship("Classroom")
+    exercise = relationship("Exercise")
+    teacher_exercise = relationship("TeacherExercise")
