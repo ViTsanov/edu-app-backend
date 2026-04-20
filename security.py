@@ -1,8 +1,7 @@
 import os
-import jwt
 from datetime import datetime, timedelta
 from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError, jwt as jose_jwt
+from jose import jwt as jose_jwt
 from dotenv import load_dotenv
 
 load_dotenv()

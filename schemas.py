@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, List
 from datetime import datetime
 import enum
@@ -21,6 +21,17 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str
+
+    @field_validator("password")
+    @classmethod
+    def password_strength(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Паролата трябва да е поне 8 символа.")
+        if not any(c.isupper() for c in v):
+            raise ValueError("Паролата трябва да съдържа поне една главна буква.")
+        if not any(c.isdigit() for c in v):
+            raise ValueError("Паролата трябва да съдържа поне една цифра.")
+        return v
 
 class UserResponse(UserBase):
     id: int
