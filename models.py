@@ -244,3 +244,21 @@ class Homework(Base):
     classroom = relationship("Classroom")
     exercise = relationship("Exercise")
     teacher_exercise = relationship("TeacherExercise")
+
+class HomeworkSubmission(Base):
+    """
+    Links a student's Result to a specific Homework assignment.
+    A Result can exist without a HomeworkSubmission (free learning path).
+    A HomeworkSubmission always points to a Result (the actual answers).
+    """
+    __tablename__ = "homework_submissions"
+ 
+    id = Column(Integer, primary_key=True, index=True)
+    homework_id = Column(Integer, ForeignKey("homework.id"), nullable=False)
+    student_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    result_id = Column(Integer, ForeignKey("results.id"), nullable=False)
+    submitted_at = Column(DateTime, default=datetime.datetime.utcnow)
+ 
+    homework = relationship("Homework")
+    student = relationship("User", foreign_keys=[student_id])
+    result = relationship("Result")

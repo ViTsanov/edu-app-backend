@@ -1,3 +1,4 @@
+import shutil
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
@@ -19,7 +20,7 @@ import string
 from models import (
     TeacherExercise, Test, TestExercise,
     TestAttempt, TestAnswer, StudentSession,
-    ImprovementSuggestion, Homework,
+    ImprovementSuggestion, Homework, HomeworkSubmission
 )
 from datetime import datetime as dt
 
@@ -1299,3 +1300,388 @@ def end_session(
         session.duration_seconds = int((now - session.started_at).total_seconds())
     db.commit()
     return {"status": "success", "duration_seconds": session.duration_seconds}
+
+@app.get("/classrooms/{classroom_id}/detail")
+def get_classroom_detail(
+    classroom_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """
+    Returns full classroom detail for a student:
+    - classroom info
+    - all homework (past + current) with completion status
+    - all active (and upcoming) tests with attempt status
+    """
+    # Verify student is a member of this classroom
+    enrollment = db.query(models.ClassStudent).filter(
+        models.ClassStudent.user_id == current_user.id,
+        models.ClassStudent.classroom_id == classroom_id
+    ).first()
+    if not enrollment:
+        raise HTTPException(403, "Не си в този клас.")
+ 
+    classroom = db.query(models.Classroom).filter(
+        models.Classroom.id == classroom_id
+    ).first()
+    if not classroom:
+        raise HTTPException(404, "Класът не е намерен.")
+ 
+    teacher = db.query(models.User).filter(
+        models.User.id == classroom.teacher_id
+    ).first()
+    level = db.query(models.Level).filter(
+        models.Level.id == classroom.level_id
+    ).first()
+    classmate_count = db.query(models.ClassStudent).filter(
+        models.ClassStudent.classroom_id == classroom_id
+    ).count()
+ 
+    now = dt.utcnow()
+ 
+    # ── Homework ──────────────────────────────────────────────────
+    homework_list = db.query(models.Homework).filter(
+        models.Homework.classroom_id == classroom_id
+    ).order_by(models.Homework.due_date.asc().nulls_last(),
+               models.Homework.created_at.desc()).all()
+ 
+    homework_out = []
+    for hw in homework_list:
+        # Check if THIS student submitted
+        submission = db.query(models.HomeworkSubmission).filter(
+            models.HomeworkSubmission.homework_id == hw.id,
+            models.HomeworkSubmission.student_id == current_user.id
+        ).first()
+ 
+        # Get exercise content
+        content_prompt = None
+        source_exercise_id = None
+        if hw.exercise_id:
+            ex = db.query(models.Exercise).filter(
+                models.Exercise.id == hw.exercise_id
+            ).first()
+            content_prompt = ex.content_prompt if ex else None
+            source_exercise_id = hw.exercise_id
+        elif hw.teacher_exercise_id:
+            ex = db.query(models.TeacherExercise).filter(
+                models.TeacherExercise.id == hw.teacher_exercise_id
+            ).first()
+            content_prompt = ex.content_prompt if ex else None
+ 
+        overdue = hw.due_date is not None and hw.due_date < now
+ 
+        # Get score if submitted
+        score = None
+        if submission:
+            analysis = db.query(models.AIAnalysis).filter(
+                models.AIAnalysis.result_id == submission.result_id
+            ).first()
+            score = analysis.grammar_score if analysis else None
+ 
+        homework_out.append({
+            "id": hw.id,
+            "title": hw.title,
+            "description": hw.description,
+            "exercise_id": hw.exercise_id,
+            "teacher_exercise_id": hw.teacher_exercise_id,
+            "source_exercise_id": source_exercise_id,
+            "content_prompt": content_prompt,
+            "due_date": hw.due_date.isoformat() if hw.due_date else None,
+            "submitted": submission is not None,
+            "score": score,
+            "overdue": overdue and submission is None,
+            "submitted_at": submission.submitted_at.isoformat()
+                if submission else None
+        })
+ 
+    # ── Tests ─────────────────────────────────────────────────────
+    tests = db.query(models.Test).filter(
+        models.Test.classroom_id == classroom_id,
+        models.Test.is_active == True
+    ).order_by(models.Test.opens_at.asc().nulls_first()).all()
+ 
+    tests_out = []
+    for t in tests:
+        is_open = t.opens_at is None or t.opens_at <= now
+        attempt = db.query(models.TestAttempt).filter(
+            models.TestAttempt.test_id == t.id,
+            models.TestAttempt.student_id == current_user.id,
+            models.TestAttempt.is_completed == True
+        ).first()
+        tests_out.append({
+            "id": t.id,
+            "title": t.title,
+            "description": t.description,
+            "time_limit_minutes": t.time_limit_minutes,
+            "exercise_count": len(t.exercises),
+            "is_open": is_open,
+            "opens_at": t.opens_at.isoformat() if t.opens_at else None,
+            "is_completed": attempt is not None,
+            "my_score": attempt.total_score if attempt else None
+        })
+ 
+    return {
+        "id": classroom.id,
+        "name": classroom.name,
+        "level": level.name if level else "A1",
+        "teacher_name": teacher.username if teacher else "Unknown",
+        "classmate_count": classmate_count,
+        "homework": homework_out,
+        "tests": tests_out
+    }
+ 
+ 
+# ════════════════════════════════════════════════════
+# STUDENT — SUBMIT HOMEWORK (links answer to homework)
+# ════════════════════════════════════════════════════
+ 
+class HomeworkSubmissionRequest(BaseModel):
+    questions: List[str]
+    expected_answers: List[str]
+    user_answers: List[str]
+ 
+ 
+@app.post("/homework/{homework_id}/submit-text")
+async def submit_homework_text(
+    homework_id: int,
+    body: HomeworkSubmissionRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db)
+):
+    """Student submits a homework exercise. Creates a Result + HomeworkSubmission."""
+    hw = db.query(models.Homework).filter(
+        models.Homework.id == homework_id
+    ).first()
+    if not hw:
+        raise HTTPException(404, "Домашното не е намерено.")
+ 
+    # Check student is in the classroom
+    enrollment = db.query(models.ClassStudent).filter(
+        models.ClassStudent.user_id == current_user.id,
+        models.ClassStudent.classroom_id == hw.classroom_id
+    ).first()
+    if not enrollment:
+        raise HTTPException(403, "Не си в този клас.")
+ 
+    # Prevent double submission
+    existing = db.query(models.HomeworkSubmission).filter(
+        models.HomeworkSubmission.homework_id == homework_id,
+        models.HomeworkSubmission.student_id == current_user.id
+    ).first()
+    if existing:
+        raise HTTPException(400, "Вече си предал това домашно.")
+ 
+    # AI evaluation
+    ai_eval = await ai_service.evaluate_text_exercise(
+        body.questions, body.expected_answers, body.user_answers
+    )
+    xp_earned = 5 + (ai_eval["grammar_score"] // 10)
+ 
+    # Save Result
+    new_result = models.Result(
+        user_id=current_user.id,
+        exercise_id=hw.exercise_id,     # may be None if teacher exercise
+        user_answer=" | ".join(body.user_answers),
+        xp_earned=xp_earned
+    )
+    db.add(new_result)
+    db.flush()
+ 
+    # Save AI analysis
+    new_analysis = models.AIAnalysis(
+        result_id=new_result.id,
+        grammar_score=ai_eval["grammar_score"],
+        fluency_score=0,
+        strengths=ai_eval.get("strengths", ""),
+        weaknesses=ai_eval.get("weaknesses", ""),
+        explanation=ai_eval.get("explanation", "")
+    )
+    db.add(new_analysis)
+ 
+    # Save HomeworkSubmission (the link)
+    submission = models.HomeworkSubmission(
+        homework_id=homework_id,
+        student_id=current_user.id,
+        result_id=new_result.id
+    )
+    db.add(submission)
+ 
+    # Add XP
+    current_user.total_xp += xp_earned
+    db.commit()
+ 
+    ai_eval["xp_earned"] = xp_earned
+    return {"status": "success", "data": ai_eval}
+ 
+ 
+@app.post("/homework/{homework_id}/submit-audio")
+async def submit_homework_audio(
+    homework_id: int,
+    current_user: models.User = Depends(get_current_user),
+    file: UploadFile = File(...),
+    db: Session = Depends(database.get_db)
+):
+    """Student submits audio for a speaking homework exercise."""
+    import uuid
+    hw = db.query(models.Homework).filter(
+        models.Homework.id == homework_id
+    ).first()
+    if not hw:
+        raise HTTPException(404, "Домашното не е намерено.")
+ 
+    enrollment = db.query(models.ClassStudent).filter(
+        models.ClassStudent.user_id == current_user.id,
+        models.ClassStudent.classroom_id == hw.classroom_id
+    ).first()
+    if not enrollment:
+        raise HTTPException(403, "Не си в този клас.")
+ 
+    existing = db.query(models.HomeworkSubmission).filter(
+        models.HomeworkSubmission.homework_id == homework_id,
+        models.HomeworkSubmission.student_id == current_user.id
+    ).first()
+    if existing:
+        raise HTTPException(400, "Вече си предал това домашно.")
+ 
+    # Get exercise content for context
+    instructions, content, correct_answers = "Read aloud.", [], []
+    ex_id = hw.exercise_id or hw.teacher_exercise_id
+    if hw.exercise_id:
+        ex = db.query(models.Exercise).filter(models.Exercise.id == hw.exercise_id).first()
+    elif hw.teacher_exercise_id:
+        ex = db.query(models.TeacherExercise).filter(
+            models.TeacherExercise.id == hw.teacher_exercise_id
+        ).first()
+    else:
+        ex = None
+ 
+    if ex:
+        try:
+            ex_data = json.loads(ex.content_prompt)
+            instructions = ex_data.get("instructions", instructions)
+            content = ex_data.get("content", [])
+            correct_answers = ex_data.get("correct_answers", [])
+        except Exception:
+            pass
+ 
+    temp_path = f"temp_{uuid.uuid4()}.m4a"
+    with open(temp_path, "wb") as buf:
+        shutil.copyfileobj(file.file, buf)
+ 
+    try:
+        ai_eval = await ai_service.evaluate_audio_exercise(
+            temp_path, instructions, content, correct_answers
+        )
+        xp_earned = 5 + (ai_eval.get("grammar_score", 0) // 10)
+ 
+        new_result = models.Result(
+            user_id=current_user.id,
+            exercise_id=hw.exercise_id,
+            user_answer=ai_eval.get("transcribed_text", ""),
+            xp_earned=xp_earned
+        )
+        db.add(new_result)
+        db.flush()
+ 
+        db.add(models.AIAnalysis(
+            result_id=new_result.id,
+            grammar_score=ai_eval.get("grammar_score", 0),
+            fluency_score=ai_eval.get("fluency_score", 0),
+            strengths=ai_eval.get("strengths", ""),
+            weaknesses=ai_eval.get("weaknesses", ""),
+            explanation=ai_eval.get("explanation", ""),
+            pronunciation_tips=ai_eval.get("pronunciation_tips", "")
+        ))
+        db.add(models.HomeworkSubmission(
+            homework_id=homework_id,
+            student_id=current_user.id,
+            result_id=new_result.id
+        ))
+        current_user.total_xp += xp_earned
+        db.commit()
+ 
+        ai_eval["xp_earned"] = xp_earned
+        return {"status": "success", "message": "Аудиото е оценено!", "data": ai_eval}
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+ 
+ 
+# ════════════════════════════════════════════════════
+# TEACHER — VIEW HOMEWORK SUBMISSIONS
+# ════════════════════════════════════════════════════
+ 
+@app.get("/teacher/homework/{homework_id}/submissions")
+def get_homework_submissions(
+    homework_id: int,
+    teacher: models.User = Depends(check_is_teacher),
+    db: Session = Depends(database.get_db)
+):
+    """
+    Teacher sees all student submissions for a specific homework.
+    Returns per-student: username, answers, AI scores, completion status.
+    """
+    hw = db.query(models.Homework).filter(
+        models.Homework.id == homework_id,
+        models.Homework.teacher_id == teacher.id
+    ).first()
+    if not hw:
+        raise HTTPException(404, "Домашното не е намерено.")
+ 
+    # All students in the classroom
+    enrollments = db.query(models.ClassStudent).filter(
+        models.ClassStudent.classroom_id == hw.classroom_id
+    ).all()
+ 
+    result = []
+    for enrollment in enrollments:
+        student = db.query(models.User).filter(
+            models.User.id == enrollment.user_id
+        ).first()
+        if not student:
+            continue
+ 
+        submission = db.query(models.HomeworkSubmission).filter(
+            models.HomeworkSubmission.homework_id == homework_id,
+            models.HomeworkSubmission.student_id == student.id
+        ).first()
+ 
+        if submission:
+            res = db.query(models.Result).filter(
+                models.Result.id == submission.result_id
+            ).first()
+            analysis = db.query(models.AIAnalysis).filter(
+                models.AIAnalysis.result_id == submission.result_id
+            ).first()
+            user_answers = res.user_answer.split(" | ") if res and res.user_answer else []
+            result.append({
+                "student_id": student.id,
+                "username": student.username,
+                "submitted": True,
+                "submitted_at": submission.submitted_at.isoformat(),
+                "user_answers": user_answers,
+                "grammar_score": analysis.grammar_score if analysis else None,
+                "fluency_score": analysis.fluency_score if analysis else None,
+                "strengths": analysis.strengths if analysis else "",
+                "weaknesses": analysis.weaknesses if analysis else "",
+                "explanation": analysis.explanation if analysis else "",
+                "xp_earned": res.xp_earned if res else 0
+            })
+        else:
+            result.append({
+                "student_id": student.id,
+                "username": student.username,
+                "submitted": False,
+                "submitted_at": None,
+                "user_answers": [],
+                "grammar_score": None,
+                "fluency_score": None,
+                "strengths": "",
+                "weaknesses": "",
+                "explanation": "",
+                "xp_earned": 0
+            })
+ 
+    # Sort: submitted first, then by score desc
+    result.sort(key=lambda x: (not x["submitted"], -(x["grammar_score"] or 0)))
+    return result
