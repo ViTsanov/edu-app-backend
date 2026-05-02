@@ -99,6 +99,7 @@ async def evaluate_audio_exercise(audio_file_path: str, instructions: str, conte
     result_data["transcribed_text"] = transcribed_text 
     
     return result_data
+
 async def evaluate_text_exercise(questions: list, expected: list, user_answers: list):
     prompt = f"""
     You are an expert English teacher evaluating a student's text exercise.

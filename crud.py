@@ -16,11 +16,11 @@ def create_user(db: Session, user: schemas.UserCreate):
     
     # 2. Създаваме записа за базата данни с новите полета
     db_user = models.User(
-        username=user.username,      # Вече използваме username от схемата
+        username=user.username,      
         email=user.email,
         hashed_password=hashed_password,
-        role_id=user.role_id,        # Записваме подаденото ID на ролята
-        total_xp=0                   # Всеки нов започва с 0 точки
+        role_id=user.role_id,        
+        total_xp=0                   
     )
     
     # 3. Добавяме и записваме в PostgreSQL
@@ -30,14 +30,13 @@ def create_user(db: Session, user: schemas.UserCreate):
     
     return db_user
 
-# --- ТОВА Е ЛИПСВАЩАТА ФУНКЦИЯ ---
+
 # Тази функция сравнява въведената парола с криптираната в базата
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
 
 # Вземане на всички неодобрени упражнения
 def get_pending_exercises(db: Session):
-    # Използваме новия статус PENDING
     return db.query(models.Exercise).filter(models.Exercise.status == models.ExerciseStatus.PENDING).all()
 
 # Одобряване на конкретно упражнение

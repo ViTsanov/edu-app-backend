@@ -1,4 +1,4 @@
-import shutil
+import shutil   
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
@@ -23,6 +23,15 @@ from models import (
     ImprovementSuggestion, Homework, HomeworkSubmission
 )
 from datetime import datetime as dt
+import httpx
+import asyncio
+import firebase_admin
+from firebase_admin import credentials, messaging
+
+# Initialize once at startup (after imports, before routes):
+_firebase_app = None
+_FIREBASE_CRED_PATH = os.getenv("FIREBASE_CRED_PATH", "")
+
 
 ALLOWED_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg", ".webm", ".mp4"}
 MAX_AUDIO_SIZE_MB = 25
@@ -135,6 +144,9 @@ class HomeworkCreate(BaseModel):
 class TestActivateRequest(BaseModel):
     opens_at: Optional[str] = None
 
+class FcmTokenRequest(BaseModel):
+    fcm_token: str
+
 
 # ── Dependencies ──────────────────────────────────────────────────────────────
 
@@ -169,9 +181,62 @@ def check_is_teacher(current_user: models.User = Depends(get_current_user)):
     return current_user
 
 
+def _check_level_up(user: models.User) -> None:
+    """
+    Updates english_level based on total_xp.
+    Called after every XP gain.
+    """
+    xp = user.total_xp
+    if xp >= 2000:
+        user.english_level = "C1"
+    elif xp >= 1200:
+        user.english_level = "B2"
+    elif xp >= 700:
+        user.english_level = "B1"
+    elif xp >= 300:
+        user.english_level = "A2"
+    else:
+        user.english_level = "A1"
+
+
 def _random_code(length: int = 6) -> str:
     return "".join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
+
+
+def _get_firebase_app():
+    global _firebase_app
+    if _firebase_app is None and _FIREBASE_CRED_PATH:
+        try:
+            cred = credentials.Certificate(_FIREBASE_CRED_PATH)
+            _firebase_app = firebase_admin.initialize_app(cred)
+        except Exception as e:
+            print(f"Firebase init failed: {e}")
+    return _firebase_app
+
+async def send_fcm_notification(token: str, title: str, body: str) -> None:
+    """Send a single FCM V1 push notification. Silently ignores errors."""
+    app = _get_firebase_app()
+    if app is None or not token:
+        return
+    try:
+        message = messaging.Message(
+            notification=messaging.Notification(title=title, body=body),
+            android=messaging.AndroidConfig(priority="high"),
+            token=token,
+        )
+        messaging.send(message)
+    except Exception as e:
+        print(f"FCM error: {e}")
+
+async def notify_classroom_students(classroom_id: int, title: str, body: str, db) -> None:
+    enrollments = db.query(models.ClassStudent).filter(
+        models.ClassStudent.classroom_id == classroom_id
+    ).all()
+    for enrollment in enrollments:
+        student = db.query(models.User).filter(models.User.id == enrollment.user_id).first()
+        if student and student.fcm_token:
+            await send_fcm_notification(student.fcm_token, title, body)
 
 # ── General ───────────────────────────────────────────────────────────────────
 
@@ -252,8 +317,13 @@ async def trigger_ai_exercise(
     raw_ai_data = await ai_service.generate_exercise_ai(
         module=db_module.name, level=db_level.name
     )
+    try:
+        parsed_content = json.loads(raw_ai_data)
+        exercise_title = parsed_content.get("title") or f"AI - {db_module.name} {db_level.name}"
+    except Exception:
+        exercise_title = f"AI - {db_module.name} {db_level.name}"
     new_exercise = models.Exercise(
-        title=f"AI Generated - Level {db_level.name}",
+        title=exercise_title,
         content_prompt=raw_ai_data,
         level_id=level_id,
         module_id=module_id,
@@ -296,6 +366,26 @@ def edit_exercise(
     if not exercise:
         raise HTTPException(status_code=404, detail="Упражнението не е намерено")
     return {"status": "success", "message": f"Упражнение №{exercise_id} е обновено!"}
+
+
+@app.post("/expert/create-exercise-manual")
+def create_exercise_manual(
+    body: TeacherExerciseCreate,
+    expert: Annotated[models.User, Depends(check_is_expert)],
+    db: Session = Depends(database.get_db),
+):
+    """Expert creates an exercise manually — goes directly to APPROVED."""
+    new_exercise = models.Exercise(
+        title=body.title,
+        content_prompt=body.content_prompt,
+        level_id=body.level_id or 1,
+        module_id=body.module_id or 1,
+        status=models.ExerciseStatus.APPROVED,
+    )
+    db.add(new_exercise)
+    db.commit()
+    db.refresh(new_exercise)
+    return {"id": new_exercise.id, "message": "Упражнението е създадено и веднага активно!"}
 
 
 @app.delete("/expert/reject/{exercise_id}")
@@ -444,6 +534,7 @@ async def submit_audio_exercise(
         )
         db.add(new_analysis)
         current_user.total_xp += xp_earned
+        _check_level_up(current_user)
         db.commit()
         ai_evaluation["xp_earned"] = xp_earned
         return {
@@ -484,6 +575,7 @@ async def submit_text_exercise(
     )
     db.add(new_analysis)
     current_user.total_xp += xp_earned
+    _check_level_up(current_user)
     db.commit()
     ai_evaluation["xp_earned"] = xp_earned
     return {"status": "success", "data": ai_evaluation}
@@ -755,14 +847,11 @@ def get_student_homework(
     now = dt.utcnow()
     result = []
     for hw in homework_list:
-        completed = False
-        if hw.exercise_id:
-            res = db.query(models.Result).filter(
-                models.Result.user_id == current_user.id,
-                models.Result.exercise_id == hw.exercise_id,
-            ).first()
-            completed = res is not None
-        content_prompt = None
+        submission = db.query(models.HomeworkSubmission).filter(
+            models.HomeworkSubmission.homework_id == hw.id,
+            models.HomeworkSubmission.student_id == current_user.id,
+        ).first()
+        completed = submission is not None
         if hw.exercise_id:
             ex = db.query(models.Exercise).filter(models.Exercise.id == hw.exercise_id).first()
             if ex:
@@ -921,6 +1010,7 @@ async def submit_test(
     attempt.ai_feedback = test_feedback
     attempt.is_completed = True
     current_user.total_xp += xp_earned
+    _check_level_up(current_user)
     suggestion = ImprovementSuggestion(
         user_id=current_user.id,
         source_type="test",
@@ -1007,10 +1097,30 @@ def get_teacher_exercises(
     return [
         {
             "id": e.id, "title": e.title, "module_id": e.module_id,
-            "level_id": e.level_id, "created_at": e.created_at.isoformat(),
+            "level_id": e.level_id, "content_prompt": e.content_prompt,
+            "created_at": e.created_at.isoformat(),
         }
         for e in exercises
     ]
+
+
+@app.put("/teacher/exercises/{exercise_id}")
+def update_teacher_exercise(
+    exercise_id: int,
+    body: TeacherExerciseCreate,
+    teacher: models.User = Depends(check_is_teacher),
+    db: Session = Depends(database.get_db),
+):
+    ex = db.query(TeacherExercise).filter(
+        TeacherExercise.id == exercise_id,
+        TeacherExercise.teacher_id == teacher.id,
+    ).first()
+    if not ex:
+        raise HTTPException(404, "Упражнението не е намерено.")
+    ex.title = body.title
+    ex.content_prompt = body.content_prompt
+    db.commit()
+    return {"status": "success", "message": "Упражнението е обновено."}
 
 
 @app.delete("/teacher/exercises/{exercise_id}")
@@ -1081,7 +1191,7 @@ def add_exercise_to_test(
 
 
 @app.put("/teacher/tests/{test_id}/activate")
-def activate_test(
+async def activate_test(
     test_id: int,
     body: TestActivateRequest = TestActivateRequest(),
     teacher: models.User = Depends(check_is_teacher),
@@ -1104,12 +1214,42 @@ def activate_test(
         if test.opens_at
         else "достъпен веднага"
     )
+    asyncio.create_task(notify_classroom_students(
+        classroom_id=test.classroom_id,
+        title="Нов тест е наличен 📝",
+        body=f"Отворен е тест: {test.title}",
+        db=db
+    ))
     return {
         "status": "success",
         "is_active": True,
         "opens_at": test.opens_at.isoformat() if test.opens_at else None,
         "message": f"Тестът е активиран — {opens_msg}.",
     }
+
+
+@app.put("/teacher/tests/{test_id}/classroom")
+def update_test_classroom(
+    test_id: int,
+    body: dict,
+    teacher: models.User = Depends(check_is_teacher),
+    db: Session = Depends(database.get_db),
+):
+    test = db.query(Test).filter(Test.id == test_id, Test.teacher_id == teacher.id).first()
+    if not test:
+        raise HTTPException(404, "Тестът не е намерен.")
+    new_classroom_id = body.get("classroom_id")
+    if not new_classroom_id:
+        raise HTTPException(400, "Липсва classroom_id.")
+    classroom = db.query(models.Classroom).filter(
+        models.Classroom.id == new_classroom_id,
+        models.Classroom.teacher_id == teacher.id
+    ).first()
+    if not classroom:
+        raise HTTPException(404, "Класът не е намерен или не е ваш.")
+    test.classroom_id = new_classroom_id
+    db.commit()
+    return {"status": "success", "message": "Класът на теста е променен."}
 
 
 @app.put("/teacher/tests/{test_id}/deactivate")
@@ -1179,13 +1319,12 @@ def get_test_results(
 # ── Homework ──────────────────────────────────────────────────────────────────
 
 @app.post("/teacher/homework")
-def create_homework(
+async def create_homework(
     body: HomeworkCreate,
     teacher: models.User = Depends(check_is_teacher),
     db: Session = Depends(database.get_db),
 ):
-    if not body.exercise_id and not body.teacher_exercise_id:
-        raise HTTPException(400, "Трябва exercise_id или teacher_exercise_id.")
+    # exercise is optional — homework may be title+description only
     classroom = db.query(models.Classroom).filter(
         models.Classroom.id == body.classroom_id,
         models.Classroom.teacher_id == teacher.id,
@@ -1203,13 +1342,19 @@ def create_homework(
         classroom_id=body.classroom_id,
         title=body.title,
         description=body.description,
-        exercise_id=body.exercise_id,
-        teacher_exercise_id=body.teacher_exercise_id,
+        exercise_id=body.exercise_id if body.exercise_id and body.exercise_id > 0 else None,
+        teacher_exercise_id=body.teacher_exercise_id if body.teacher_exercise_id and body.teacher_exercise_id > 0 else None,
         due_date=due,
     )
     db.add(hw)
     db.commit()
     db.refresh(hw)
+    asyncio.create_task(notify_classroom_students(
+        classroom_id=body.classroom_id,
+        title="Ново домашно 📚",
+        body=f"Имате ново домашно: {body.title}",
+        db=db
+    ))
     return {"id": hw.id, "message": "Домашното е зададено успешно!"}
 
 
@@ -1238,12 +1383,21 @@ def get_teacher_homework(
                 models.Result.exercise_id == hw.exercise_id,
                 models.Result.user_id.in_(student_ids),
             ).count()
+        # Fetch content_prompt for homework review screen
+        content_prompt = None
+        if hw.exercise_id:
+            ex = db.query(models.Exercise).filter(models.Exercise.id == hw.exercise_id).first()
+            content_prompt = ex.content_prompt if ex else None
+        elif hw.teacher_exercise_id:
+            ex = db.query(TeacherExercise).filter(TeacherExercise.id == hw.teacher_exercise_id).first()
+            content_prompt = ex.content_prompt if ex else None
         result.append({
             "id": hw.id, "title": hw.title, "description": hw.description,
             "classroom_name": classroom.name if classroom else "",
             "classroom_id": hw.classroom_id,
             "exercise_id": hw.exercise_id,
             "teacher_exercise_id": hw.teacher_exercise_id,
+            "content_prompt": content_prompt,
             "due_date": hw.due_date.isoformat() if hw.due_date else None,
             "created_at": hw.created_at.isoformat(),
             "student_count": len(student_ids), "completed_count": completed,
@@ -1307,25 +1461,25 @@ def get_classroom_detail(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(database.get_db)
 ):
-    """
-    Returns full classroom detail for a student:
-    - classroom info
-    - all homework (past + current) with completion status
-    - all active (and upcoming) tests with attempt status
-    """
-    # Verify student is a member of this classroom
-    enrollment = db.query(models.ClassStudent).filter(
-        models.ClassStudent.user_id == current_user.id,
-        models.ClassStudent.classroom_id == classroom_id
-    ).first()
-    if not enrollment:
-        raise HTTPException(403, "Не си в този клас.")
- 
     classroom = db.query(models.Classroom).filter(
         models.Classroom.id == classroom_id
     ).first()
     if not classroom:
         raise HTTPException(404, "Класът не е намерен.")
+
+    # Teachers can view their own classrooms
+    # Students can view classrooms they are enrolled in
+    is_teacher_of_classroom = (
+        current_user.role_id in (2, 4) and
+        classroom.teacher_id == current_user.id
+    )
+    is_student_in_classroom = db.query(models.ClassStudent).filter(
+        models.ClassStudent.user_id == current_user.id,
+        models.ClassStudent.classroom_id == classroom_id
+    ).first() is not None
+
+    if not is_teacher_of_classroom and not is_student_in_classroom:
+        raise HTTPException(403, "Нямате достъп до този клас.")
  
     teacher = db.query(models.User).filter(
         models.User.id == classroom.teacher_id
@@ -1347,13 +1501,11 @@ def get_classroom_detail(
  
     homework_out = []
     for hw in homework_list:
-        # Check if THIS student submitted
         submission = db.query(models.HomeworkSubmission).filter(
             models.HomeworkSubmission.homework_id == hw.id,
             models.HomeworkSubmission.student_id == current_user.id
         ).first()
  
-        # Get exercise content
         content_prompt = None
         source_exercise_id = None
         if hw.exercise_id:
@@ -1369,8 +1521,7 @@ def get_classroom_detail(
             content_prompt = ex.content_prompt if ex else None
  
         overdue = hw.due_date is not None and hw.due_date < now
- 
-        # Get score if submitted
+
         score = None
         if submission:
             analysis = db.query(models.AIAnalysis).filter(
@@ -1462,8 +1613,7 @@ async def submit_homework_text(
     ).first()
     if not enrollment:
         raise HTTPException(403, "Не си в този клас.")
- 
-    # Prevent double submission
+
     existing = db.query(models.HomeworkSubmission).filter(
         models.HomeworkSubmission.homework_id == homework_id,
         models.HomeworkSubmission.student_id == current_user.id
@@ -1480,7 +1630,7 @@ async def submit_homework_text(
     # Save Result
     new_result = models.Result(
         user_id=current_user.id,
-        exercise_id=hw.exercise_id,     # may be None if teacher exercise
+        exercise_id=hw.exercise_id,     
         user_answer=" | ".join(body.user_answers),
         xp_earned=xp_earned
     )
@@ -1497,8 +1647,7 @@ async def submit_homework_text(
         explanation=ai_eval.get("explanation", "")
     )
     db.add(new_analysis)
- 
-    # Save HomeworkSubmission (the link)
+
     submission = models.HomeworkSubmission(
         homework_id=homework_id,
         student_id=current_user.id,
@@ -1508,6 +1657,7 @@ async def submit_homework_text(
  
     # Add XP
     current_user.total_xp += xp_earned
+    _check_level_up(current_user)
     db.commit()
  
     ai_eval["xp_earned"] = xp_earned
@@ -1542,8 +1692,7 @@ async def submit_homework_audio(
     ).first()
     if existing:
         raise HTTPException(400, "Вече си предал това домашно.")
- 
-    # Get exercise content for context
+
     instructions, content, correct_answers = "Read aloud.", [], []
     ex_id = hw.exercise_id or hw.teacher_exercise_id
     if hw.exercise_id:
@@ -1681,7 +1830,17 @@ def get_homework_submissions(
                 "explanation": "",
                 "xp_earned": 0
             })
- 
-    # Sort: submitted first, then by score desc
+
     result.sort(key=lambda x: (not x["submitted"], -(x["grammar_score"] or 0)))
     return result
+
+@app.put("/users/me/fcm-token")
+async def update_fcm_token(
+    body: FcmTokenRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(database.get_db),
+):
+    """Called by the Android app after it receives a new FCM token."""
+    current_user.fcm_token = body.fcm_token
+    db.commit()
+    return {"status": "success"}

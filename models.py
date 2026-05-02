@@ -36,6 +36,7 @@ class User(Base):
     english_level = Column(String, default="A1")
     profile_picture = Column(String, nullable=True)
     teacher_verification_status = Column(String, default="none")
+    fcm_token = Column(String, nullable=True)
 
 class Level(Base):
     __tablename__ = "levels"
@@ -164,9 +165,9 @@ class TestAttempt(Base):
     student_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     started_at = Column(DateTime, default=datetime.datetime.utcnow)
     finished_at = Column(DateTime, nullable=True)
-    total_score = Column(Integer, nullable=True)        # 0-100 average
+    total_score = Column(Integer, nullable=True)        
     xp_earned = Column(Integer, default=0)
-    ai_feedback = Column(Text, nullable=True)           # AI analysis of whole test
+    ai_feedback = Column(Text, nullable=True)           
     is_completed = Column(Boolean, default=False)
 
     test = relationship("Test", back_populates="attempts")
@@ -216,10 +217,10 @@ class ImprovementSuggestion(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    source_type = Column(String)          # "exercise" | "test"
-    source_id = Column(Integer)           # result_id or attempt_id
-    suggestion_text = Column(Text)        # Bulgarian text from AI
-    focus_areas = Column(Text)            # JSON array e.g. ["grammar", "pronunciation"]
+    source_type = Column(String)          
+    source_id = Column(Integer)           
+    suggestion_text = Column(Text)       
+    focus_areas = Column(Text)            
     created_at = Column(DateTime, default=datetime.datetime.utcnow)
     is_read = Column(Boolean, default=False)
 
@@ -234,7 +235,6 @@ class Homework(Base):
     classroom_id = Column(Integer, ForeignKey("classrooms.id"), nullable=False)
     title = Column(String, index=True)
     description = Column(Text, nullable=True)
-    # Exactly one of these two must be set (approved or teacher's own)
     exercise_id = Column(Integer, ForeignKey("exercises.id"), nullable=True)
     teacher_exercise_id = Column(Integer, ForeignKey("teacher_exercises.id"), nullable=True)
     due_date = Column(DateTime, nullable=True)

@@ -27,6 +27,7 @@ psycopg-binary==3.2.13
 pyasn1==0.4.8
 pycparser==2.23
 pydantic==2.10.6
+firebase-admin==6.5.0
 pydantic_core==2.27.2
 PyJWT==2.9.0
 python-dotenv==1.0.1
