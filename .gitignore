@@ -20,7 +20,7 @@ __pycache__/
 .env
 secrets.json
 
-# База данни (ако ползвахме SQLite, но ние сме с Postgres, все пак е добра практика)
+# База данни 
 *.db
 *.sqlite3
 
